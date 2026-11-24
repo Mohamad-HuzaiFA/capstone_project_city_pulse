@@ -175,14 +175,38 @@ def get_columns(conn: duckdb.DuckDBPyConnection) -> list[tuple[str, str]]:
 
 
 def get_numeric_columns(columns: list[tuple[str, str]]) -> list[str]:
+    """Return numeric columns that represent measurements, not category codes."""
     numeric_types = (
         "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT",
         "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT",
         "FLOAT", "DOUBLE", "REAL", "DECIMAL",
     )
+    # These fields are numeric in the source schema but are identifiers/codes.
+    categorical_identifiers = {
+        "vendorid", "ratecodeid", "payment_type",
+        "pulocationid", "dolocationid",
+    }
     result = []
     for name, dtype in columns:
+        if name.lower() == "filename" or name.lower() in categorical_identifiers:
+            continue
         if any(dtype.startswith(kind) for kind in numeric_types):
+            result.append(name)
+    return result
+
+
+def get_categorical_columns(columns: list[tuple[str, str]]) -> list[str]:
+    """Identify known code/ID fields and text columns for frequency profiling."""
+    categorical_identifiers = {
+        "vendorid", "ratecodeid", "payment_type",
+        "pulocationid", "dolocationid",
+    }
+    text_types = ("VARCHAR", "CHAR", "TEXT", "STRING", "ENUM")
+    result = []
+    for name, dtype in columns:
+        if name.lower() == "filename":
+            continue
+        if name.lower() in categorical_identifiers or dtype.startswith(text_types):
             result.append(name)
     return result
 
@@ -197,7 +221,11 @@ def build_report(
     column_names = {name for name, _ in columns}
 
     total_rows = conn.execute("SELECT COUNT(*) FROM source_data").fetchone()[0]
-    column_count = len(columns)
+    # DuckDB's filename=true option adds a virtual provenance column. Keep it
+    # visible in the report, but distinguish it from the source schema.
+    source_columns = [(name, dtype) for name, dtype in columns if name.lower() != "filename"]
+    source_column_count = len(source_columns)
+    metadata_column_count = len(columns) - source_column_count
 
     # Dataset overview
     file_rows = conn.execute(
@@ -211,7 +239,9 @@ def build_report(
 
     overview_rows = [
         ["Total rows", f"{total_rows:,}"],
-        ["Number of columns", f"{column_count:,}"],
+        ["Source data columns", f"{source_column_count:,}"],
+        ["Technical metadata columns", f"{metadata_column_count:,}"],
+        ["Total columns profiled", f"{len(columns):,}"],
         ["Number of input files", f"{len(files):,}"],
         ["Rows retained in current run", "Calculated below"],
     ]
@@ -265,6 +295,70 @@ def build_report(
                 *[format_number(value) for value in stats],
             ]
         )
+
+    # Categorical frequency profiles: do not calculate means for numeric codes.
+    categorical_columns = get_categorical_columns(columns)
+    categorical_sections: list[str] = []
+    for name in categorical_columns:
+        col = sql_identifier(name)
+        values = conn.execute(
+            f"""
+            SELECT
+                COALESCE(CAST({col} AS VARCHAR), '<NULL>') AS category,
+                COUNT(*) AS row_count
+            FROM source_data
+            GROUP BY {col}
+            ORDER BY row_count DESC, category
+            LIMIT 30
+            """
+        ).fetchall()
+        category_rows = [
+            [category, f"{count:,}", f"{(count / total_rows * 100):.4f}%"]
+            for category, count in values
+        ]
+        categorical_sections.extend([
+            f"### `{name}`",
+            "",
+            "Top 30 values by frequency (including NULL when present).",
+            "",
+            markdown_table(["Value", "Rows", "% of all rows"], category_rows),
+            "",
+        ])
+
+    # For TLC Yellow Taxi data, payment_type=0 (Flex Fare) may have a distinct
+    # missingness pattern. Report it rather than treating those NULLs as random.
+    missingness_cross_tab = []
+    if {"payment_type", "passenger_count", "RatecodeID",
+        "store_and_fwd_flag", "congestion_surcharge", "Airport_fee"}.issubset(column_names):
+        flex_missing_columns = [
+            "passenger_count", "RatecodeID", "store_and_fwd_flag",
+            "congestion_surcharge", "Airport_fee",
+        ]
+        grouped = conn.execute(
+            """
+            SELECT
+                payment_type,
+                COUNT(*) AS row_count,
+                COUNT(*) FILTER (WHERE passenger_count IS NULL) AS passenger_count_null,
+                COUNT(*) FILTER (WHERE RatecodeID IS NULL) AS ratecodeid_null,
+                COUNT(*) FILTER (WHERE store_and_fwd_flag IS NULL) AS store_and_fwd_flag_null,
+                COUNT(*) FILTER (WHERE congestion_surcharge IS NULL) AS congestion_surcharge_null,
+                COUNT(*) FILTER (WHERE Airport_fee IS NULL) AS airport_fee_null
+            FROM source_data
+            GROUP BY payment_type
+            ORDER BY payment_type NULLS LAST
+            """
+        ).fetchall()
+        for row in grouped:
+            payment_type, count, *null_counts = row
+            missingness_cross_tab.append([
+                "<NULL>" if payment_type is None else str(payment_type),
+                f"{count:,}",
+                *[
+                    f"{n:,} ({(n / count * 100):.2f}%)" if count else "—"
+                    for n in null_counts
+                ],
+            ])
 
     # Rule violations are first counted on the original data.
     rule_rows = []
@@ -388,7 +482,33 @@ def build_report(
             numeric_rows,
         ),
         "",
-        "## 4. Data-quality rule violations",
+        "## 4. Categorical profiling",
+        "",
+        "Numeric-looking identifiers and codes are treated as categories, not "
+        "continuous measurements. Frequency distributions are limited to the "
+        "30 most common values per column.",
+        "",
+        *categorical_sections,
+        "### Missingness by payment type",
+        "",
+        "This cross-tab is included when the expected TLC columns are present. "
+        "It helps identify category-dependent missingness (for example, fields "
+        "that are systematically absent for a payment category) rather than "
+        "assuming all NULL values are random.",
+        "",
+        markdown_table(
+            [
+                "payment_type", "Rows",
+                "passenger_count NULL", "RatecodeID NULL",
+                "store_and_fwd_flag NULL", "congestion_surcharge NULL",
+                "Airport_fee NULL",
+            ],
+            missingness_cross_tab if missingness_cross_tab else [
+                ["Not available", "—", "—", "—", "—", "—", "—"]
+            ],
+        ),
+        "",
+        "## 5. Data-quality rule violations",
         "",
         "Counts below are calculated against the original input data. "
         "Rules are investigation flags; they do not automatically imply invalid records.",
@@ -398,7 +518,7 @@ def build_report(
             rule_rows,
         ),
         "",
-        "## 5. Cleaning and row-impact summary",
+        "## 6. Cleaning and row-impact summary",
         "",
         f"- **Original rows:** {total_rows:,}",
         f"- **Rows dropped:** {total_dropped:,} ({dropped_pct:.4f}%)",
@@ -418,6 +538,10 @@ def build_report(
         "### Important interpretation notes",
         "",
         "- A rule violation is a flag for review, not automatic proof of bad data.",
+        "- Numeric identifiers/codes are summarized as categories; their mean and "
+        "standard deviation are generally not meaningful.",
+        "- The `filename` column is DuckDB provenance metadata added for per-file "
+        "reporting; it is not one of the original Parquet source columns.",
         "- Rule violation counts can overlap because one record may violate multiple rules.",
         "- The cleaning table reports sequential drops, so each dropped row is attributed "
         "to the first selected rule that removes it.",

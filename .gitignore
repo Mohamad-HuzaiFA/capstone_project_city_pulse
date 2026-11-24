@@ -30,3 +30,4 @@ htmlcov/
 
 # Data files (avoid committing large datasets)
 data/raw/*.parquet
+*.csv

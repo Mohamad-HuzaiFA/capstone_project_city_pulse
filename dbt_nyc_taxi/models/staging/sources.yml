@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: raw_nyc_taxi
+    schema: main
+    description: "Untouched raw NYC TLC yellow taxi monthly Parquet files."
+    tables:
+      - name: yellow_tripdata_raw
+        external_location: "read_parquet('../data/raw/yellow_tripdata_2026-*.parquet', union_by_name=true, filename=true)"

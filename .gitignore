@@ -31,3 +31,30 @@ htmlcov/
 # Data files (avoid committing large datasets)
 data/raw/*.parquet
 *.csv
+
+# DuckDB generated databases
+*.duckdb
+*.duckdb.wal
+*.wal
+
+# dbt generated artifacts
+dbt_nyc_taxi/target/
+dbt_nyc_taxi/logs/
+
+# Generated documentation
+dbt_nyc_taxi/site/
+# dbt local user metadata
+dbt_nyc_taxi/.user.yml
+
+# Ignore all raw data files
+data/raw/
+
+# Ignore generated DuckDB databases
+*.duckdb
+*.duckdb.wal
+*.wal
+
+# dbt generated artifacts
+dbt_nyc_taxi/target/
+dbt_nyc_taxi/logs/
+dbt_nyc_taxi/site/

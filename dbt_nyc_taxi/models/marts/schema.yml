@@ -1,0 +1,21 @@
+version: 2
+
+models:
+  - name: fct_zone_hour_pickups
+    description: "Gold-layer zone-hour pickup aggregates for CityPulse forecasting."
+    columns:
+      - name: zone_id
+        tests:
+          - not_null
+      - name: pickup_hour
+        tests:
+          - not_null
+      - name: pickups
+        tests:
+          - not_null
+      - name: avg_fare
+        tests:
+          - not_null
+      - name: avg_trip_minutes
+        tests:
+          - not_null
